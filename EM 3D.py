@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import RegularGridInterpolator
 import numba
 from copy import deepcopy
+import sys
+from mpl_toolkits.mplot3d import Axes3D
 
 # Constants
 epsilon_0 = 8.854187817e-12  # Vacuum permittivity in SI units (F/m)
@@ -174,11 +176,12 @@ class Plane:
 
 
 class Integrator:
-    def __init__(self, grid_size: tuple, grid_spacing=1e-2, path="output.xyz"):
+    def __init__(self, grid_size: tuple, grid_spacing=1e-2, path="output.xyz", plot_every=None):
         self.grid_spacing = grid_spacing
         self.grid_size = grid_size
         self.plane = Plane(*grid_size, self.grid_spacing)
         self.path = path
+        self.plot_every = plot_every
         
     def add_particles(self, particles: list):
         for p in particles:
@@ -230,6 +233,42 @@ class Integrator:
         axes[3].set_xlabel('x')
         axes[3].set_ylabel('y')
         axes[3].legend()
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def plot3dfield(self):
+        """
+        Plot two 3D vector fields side by side.
+
+        Parameters:
+        - vector_field1: A tuple (X, Y, Z, U, V, W) for the first field.
+        - vector_field2: A tuple (X, Y, Z, U, V, W) for the second field.
+        - title1: Title for the first plot.
+        - title2: Title for the second plot.
+        """
+        fig = plt.figure(figsize=(14, 6))
+        
+        x, y, z = np.arange(self.grid_size[0]), np.arange(self.grid_size[1]), np.arange(self.grid_size[2])
+        X, Y, Z = np.meshgrid(x, y, z)
+        
+        # Plot first vector field
+        ax1 = fig.add_subplot(121, projection='3d')
+        U1, V1, W1 = self.plane.E
+        ax1.quiver(X, Y, Z, U1, V1, W1, length=0.1, normalize=True)
+        ax1.set_title("Electric Field (E)")
+        ax1.set_xlabel("X")
+        ax1.set_ylabel("Y")
+        ax1.set_zlabel("Z")
+        
+        # Plot second vector field
+        ax2 = fig.add_subplot(122, projection='3d')
+        U2, V2, W2 = self.plane.B
+        ax2.quiver(X, Y, Z, U2, V2, W2, length=0.1, normalize=True)
+        ax2.set_title("Magnetic Field (B)")
+        ax2.set_xlabel("X")
+        ax2.set_ylabel("Y")
+        ax2.set_zlabel("Z")
         
         plt.tight_layout()
         plt.show()
@@ -301,6 +340,9 @@ class Integrator:
                 p.velocity += acceleration * dt
                 p.position += p.velocity * dt
                 
+                # periodic boundary
+                p.position = np.mod(p.position, [self.grid_size[0] * self.grid_spacing, self.grid_size[1] * self.grid_spacing, self.grid_size[2]] * self.grid_spacing)
+                
                 # plt.scatter([p.position[0] for p in self.plane.particles], [p.position[1] for p in self.plane.particles])
                 # plt.show()
                 
@@ -315,8 +357,11 @@ class Integrator:
             # Update fields
             self.plane.update_fields(timestep=dt)
             
-            if n == 1:
+            
+            if self.plot_every is not None and n % int(self.plot_every) == 0:
                 self.plot2dslice()
+                # self.plot3dfield() # run if you want to crash your pc
+                
         
         xyz_file.close()
         print("Simulation complete")
@@ -324,7 +369,11 @@ class Integrator:
 
 if __name__ == "__main__":
     
-    integrator = Integrator((200,200,200),grid_spacing=1)
+    plot_every = None
+    if len(sys.argv) > 1:
+        plot_every = sys.argv[1]
+    
+    integrator = Integrator((200,200,200),grid_spacing=1, plot_every=plot_every)
     
     # Particle Initialization
     a = Particle(
@@ -336,14 +385,14 @@ if __name__ == "__main__":
     
     # Particle Initialization
     b = Particle(
-        position=[50, 50, 199],
+        position=[100, 100, 150],
         velocity=[0.0, 0.0, 0.0],
         charge=-elementary_charge,
         mass=electron_mass
     )
     
     c = Particle(
-        position=[100, 100, 100],
+        position=[100, 100, 50],
         velocity=[0.0, 0.0, 0.0],
         charge=elementary_charge,
         mass=electron_mass
@@ -354,7 +403,7 @@ if __name__ == "__main__":
     integrator.add_particles(particles)
     
     integrator.initialize_fields()
-    integrator.simulate(dt=1e-6,N_steps=200)
+    integrator.simulate(dt=0.5e-6,N_steps=400)
     
     
 
