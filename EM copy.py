@@ -83,6 +83,24 @@ class Particle:
         self.mass = mass      # Mass (kilograms)
 
 
+@numba.njit(parallel=True)
+def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz, V, Ax, Ay, Az):
+    for z in numba.prange(zsize):
+        for y in range(ysize):
+            for x in range(xsize):
+                for p in particles:
+                    rx = x * dx - p["position"][0]
+                    ry = y * dy - p["position"][1]
+                    rz = z * dz - p["position"][2]
+                    r = np.sqrt(rx**2 + ry**2 + rz**2)
+                    if r == 0:
+                        r = 0.5 / 6  # Fractional distance instead of 0
+
+                    V[z, y, x] += p["charge"] / (4 * np.pi * epsilon_0 * r)
+                    Ax[z, y, x] += (p["charge"] * p["velocity"][0] * mu_0) / (4 * np.pi * r)
+                    Ay[z, y, x] += (p["charge"] * p["velocity"][1] * mu_0) / (4 * np.pi * r)
+                    Az[z, y, x] += (p["charge"] * p["velocity"][2] * mu_0) / (4 * np.pi * r)
+
 class Plane:
     def __init__(self, xsize, ysize, zsize, grid_spacing):
         self.xsize = xsize
@@ -92,45 +110,38 @@ class Plane:
         self.particles = []
         
         # Electric potential grid
-        self.V = np.zeros((self.ysize, self.xsize, self.zsize))
+        self.V = np.zeros((self.zsize, self.ysize, self.xsize))
         
         # Magnetic potential grid
-        self.Ax = np.zeros((self.ysize, self.xsize, self.zsize))
-        self.Ay = np.zeros((self.ysize, self.xsize, self.zsize))
-        self.Az = np.zeros((self.ysize, self.xsize, self.zsize))
+        self.Ax = np.zeros((self.zsize, self.ysize, self.xsize))
+        self.Ay = np.zeros((self.zsize, self.ysize, self.xsize))
+        self.Az = np.zeros((self.zsize, self.ysize, self.xsize))
         
         # Electric field grid
-        self.E = np.zeros((3, self.ysize, self.xsize, self.zsize))
+        self.E = np.zeros((3, self.zsize, self.ysize, self.xsize))
         
         # Magnetic field grid
-        self.B = np.zeros((3, self.ysize, self.xsize, self.zsize))
+        self.B = np.zeros((3, self.zsize, self.ysize, self.xsize))
         
-    def add_particle(self, particle: Particle):
+    def add_particle(self, particle):
         self.particles.append(particle)
         
     def update_fields(self, timestep):
-        # Electric potential
-        newV = np.zeros((self.ysize, self.xsize, self.zsize))
+        # Create empty grids for new potentials
+        newV = np.zeros_like(self.V)
+        newAx = np.zeros_like(self.Ax)
+        newAy = np.zeros_like(self.Ay)
+        newAz = np.zeros_like(self.Az)
         
-        # Magnetic potential
-        newAx = newAy = newAz = np.zeros((self.ysize, self.xsize, self.zsize))
+        # Convert particle data into a structured array for Numba
+        particle_array = np.array([
+            (p.charge, p.position, p.velocity)
+            for p in self.particles
+        ], dtype=[('charge', np.float64), ('position', np.float64, 3), ('velocity', np.float64, 3)])
         
-        
-        for z in range(self.zsize):
-            for y in range(self.ysize):
-                for x in range(self.xsize):
-                    for p in self.particles:
-                        rx = x - p.position[0]
-                        ry = y - p.position[1]
-                        rz = z - p.position[2]
-                        r = np.sqrt(rx**2 + ry**2 + rz**2)
-                        if r == 0: r = 0.5 / 6 # Fractional distance instead of 0
-                        
-                        newV[z, y, x] += p.charge / (4 * np.pi * epsilon_0 * r)
-                        
-                        newAx[z, y, x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
-                        newAy[z, y, x] += (p.charge * p.velocity[1] * mu_0) / (4 * np.pi * r)
-                        newAz[z, y, x] += (p.charge * p.velocity[2] * mu_0) / (4 * np.pi * r)
+        # Compute potentials using Numba-accelerated function
+        compute_potentials(particle_array, self.xsize, self.ysize, self.zsize, 
+                        self.dx, self.dy, self.dz, newV, newAx, newAy, newAz)
         
         # Update plane fields
         dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az]) / timestep
@@ -157,12 +168,11 @@ class Integrator:
     def initialize_fields(self):
         self.plane.update_fields(timestep=1e-6)
         
-    def simulate(self, dt=1e-11, duration=1e-6):
+    def simulate(self, dt=1e-11, N_steps = 10):
         if len(self.plane.particles) == 0:
             print("No particles initialized in simulation")
             return
         
-        N_steps = int(duration / dt)
         
         # Grid coordinates scaled to specified spacing
         x = np.arange(self.grid_size[0])
@@ -180,6 +190,7 @@ class Integrator:
         times = np.zeros(N_steps + 1)
         times[0] = 0.0
         
+        print("Starting simulation")
         # Time-stepping loop
         for n in range(N_steps):
             times[n + 1] = times[n] + dt
