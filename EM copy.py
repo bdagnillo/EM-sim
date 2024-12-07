@@ -84,7 +84,9 @@ class Particle:
 
 
 @numba.njit(parallel=True)
-def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz, V, Ax, Ay, Az):
+def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz):
+    V = Ax = Ay = Az = np.zeros((zsize, ysize, xsize))
+    
     for z in numba.prange(zsize):
         for y in range(ysize):
             for x in range(xsize):
@@ -100,6 +102,10 @@ def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz, V, Ax, Ay, Az
                     Ax[z, y, x] += (p["charge"] * p["velocity"][0] * mu_0) / (4 * np.pi * r)
                     Ay[z, y, x] += (p["charge"] * p["velocity"][1] * mu_0) / (4 * np.pi * r)
                     Az[z, y, x] += (p["charge"] * p["velocity"][2] * mu_0) / (4 * np.pi * r)
+                    
+    return V, Ax, Ay, Az
+
+
 
 class Plane:
     def __init__(self, xsize, ysize, zsize, grid_spacing):
@@ -140,8 +146,8 @@ class Plane:
         ], dtype=[('charge', np.float64), ('position', np.float64, 3), ('velocity', np.float64, 3)])
         
         # Compute potentials using Numba-accelerated function
-        compute_potentials(particle_array, self.xsize, self.ysize, self.zsize, 
-                        self.dx, self.dy, self.dz, newV, newAx, newAy, newAz)
+        newV, newAx, newAy, newAz = compute_potentials(particle_array, self.xsize, self.ysize, self.zsize, 
+                        self.dx, self.dy, self.dz)
         
         # Update plane fields
         dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az]) / timestep
@@ -168,16 +174,16 @@ class Integrator:
     def initialize_fields(self):
         self.plane.update_fields(timestep=1e-6)
         
-    def simulate(self, dt=1e-11, N_steps = 10):
+    def simulate(self, dt=1e-6, N_steps = 10):
         if len(self.plane.particles) == 0:
             print("No particles initialized in simulation")
             return
         
         
         # Grid coordinates scaled to specified spacing
-        x = np.arange(self.grid_size[0])
-        y = np.arange(self.grid_size[1])
-        z = np.arange(self.grid_size[2])
+        x = np.arange(self.grid_size[0]) * self.grid_spacing
+        y = np.arange(self.grid_size[1]) * self.grid_spacing
+        z = np.arange(self.grid_size[2]) * self.grid_spacing
         
         def get_fields(position, E_interpolators: list, B_interpolators: list):
             pos = np.mod(position, [self.grid_size[0], self.grid_size[1], self.grid_size[2]])
@@ -256,7 +262,8 @@ if __name__ == "__main__":
     
     integrator.add_particles(particles)
     
-    integrator.simulate()
+    integrator.initialize_fields()
+    integrator.simulate(N_steps=200)
     
     
 
