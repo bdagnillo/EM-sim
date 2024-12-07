@@ -5,13 +5,37 @@ import numba
 
 # Constants
 epsilon_0 = 8.854187817e-12  # Vacuum permittivity in SI units (F/m)
-mu_0 = 1.25663706127e-6 #Vacuum permeability in SI units (N/A**2)
+mu_0 = 1.25663706127e-6  # Vacuum permeability in SI units (N/A**2)
 elementary_charge = 1.602e-19
 electron_mass = 9.109e-31
 
-@numba.njit(parallel=True)
+@numba.jit(nopython=True)
+def gradient(arr, spacing, axis):
+    # Create an empty array to store the np.gradient
+    grad = np.zeros_like(arr)
+
+    if axis == 0:
+        # Compute np.gradient along the first axis (axis=0)
+        grad[1:-1, :, :] = (arr[2:, :, :] - arr[:-2, :, :]) / (2 * spacing)
+        grad[0, :, :] = (arr[1, :, :] - arr[0, :, :]) / spacing
+        grad[-1, :, :] = (arr[-1, :, :] - arr[-2, :, :]) / spacing
+
+    elif axis == 1:
+        # Compute np.gradient along the second axis (axis=1)
+        grad[:, 1:-1, :] = (arr[:, 2:, :] - arr[:, :-2, :]) / (2 * spacing)
+        grad[:, 0, :] = (arr[:, 1, :] - arr[:, 0, :]) / spacing
+        grad[:, -1, :] = (arr[:, -1, :] - arr[:, -2, :]) / spacing
+
+    elif axis == 2:
+        # Compute np.gradient along the third axis (axis=2)
+        grad[:, :, 1:-1] = (arr[:, :, 2:] - arr[:, :, :-2]) / (2 * spacing)
+        grad[:, :, 0] = (arr[:, :, 1] - arr[:, :, 0]) / spacing
+        grad[:, :, -1] = (arr[:, :, -1] - arr[:, :, -2]) / spacing
+
+    return grad
+    return grad
+
 def calculate_curl(F, dx, dy, dz):
-    
     Fx, Fy, Fz = F[0], F[1], F[2]
     
     # Partial derivatives
@@ -29,8 +53,23 @@ def calculate_curl(F, dx, dy, dz):
     
     # Combine components into a single array
     curl = np.array([curl_x, curl_y, curl_z])
-    
     return curl
+
+
+@numba.njit()
+def cross_product(A, B):
+    A_x, A_y, A_z = A[0], A[1], A[2]
+    B_x, B_y, B_z = B[0], B[1], B[2]
+    
+    # Calculate each component of the cross product
+    C_x = A_y * B_z - A_z * B_y
+    C_y = A_z * B_x - A_x * B_z
+    C_z = A_x * B_y - A_y * B_x
+    
+    # Combine components into a single array
+    C = np.array([C_x, C_y, C_z])
+    return C
+
 
 # Particle Class Definition
 class Particle:
@@ -42,10 +81,9 @@ class Particle:
         self.velocity = np.array(velocity, dtype=float)  # Velocity vector [vx, vy, vz]
         self.charge = charge  # Charge (Coulombs)
         self.mass = mass      # Mass (kilograms)
-        
-        
+
+
 class Plane:
-    
     def __init__(self, xsize, ysize, zsize, grid_spacing):
         self.xsize = xsize
         self.ysize = ysize
@@ -53,31 +91,30 @@ class Plane:
         self.dx = self.dy = self.dz = grid_spacing
         self.particles = []
         
-        # electric potential grid
-        self.V = np.zeros((self.ysize,self.xsize,self.zsize))
+        # Electric potential grid
+        self.V = np.zeros((self.ysize, self.xsize, self.zsize))
         
-        # magnetic potential grid
-        self.Ax = np.zeros((self.ysize,self.xsize,self.zsize)) 
-        self.Ay = np.zeros((self.ysize,self.xsize,self.zsize))
-        self.Az = np.zeros((self.ysize,self.xsize,self.zsize))
+        # Magnetic potential grid
+        self.Ax = np.zeros((self.ysize, self.xsize, self.zsize))
+        self.Ay = np.zeros((self.ysize, self.xsize, self.zsize))
+        self.Az = np.zeros((self.ysize, self.xsize, self.zsize))
         
-        # electric field grid
-        self.E = np.zeros((self.ysize,self.xsize,self.zsize))
+        # Electric field grid
+        self.E = np.zeros((3, self.ysize, self.xsize, self.zsize))
         
-        # magnetic field grid
-        self.B = np.zeros((self.ysize,self.xsize,self.zsize))
+        # Magnetic field grid
+        self.B = np.zeros((3, self.ysize, self.xsize, self.zsize))
         
-    def add_particle(self,particle: Particle):
+    def add_particle(self, particle: Particle):
         self.particles.append(particle)
         
-    @numba.njit(parallel=True)
     def update_fields(self, timestep):
+        # Electric potential
+        newV = np.zeros((self.ysize, self.xsize, self.zsize))
         
-        # electric potential
-        newV = np.zeros((self.ysize,self.xsize,self.zsize))
+        # Magnetic potential
+        newAx = newAy = newAz = np.zeros((self.ysize, self.xsize, self.zsize))
         
-        # magnetic potential
-        newAx = newAy = newAz = np.zeros((self.ysize,self.xsize,self.zsize))
         
         for z in range(self.zsize):
             for y in range(self.ysize):
@@ -87,28 +124,27 @@ class Plane:
                         ry = y - p.position[1]
                         rz = z - p.position[2]
                         r = np.sqrt(rx**2 + ry**2 + rz**2)
-                        r[r==0] = 0.5/6 #fractional distance instead of 0, avoids div by zero and smooths out potential
-                        newV[z,y,x] += p.charge / (4 * np.pi * epsilon_0* r)
+                        if r == 0: r = 0.5 / 6 # Fractional distance instead of 0
                         
-                        newAx[z,y,x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
-                        newAy[z,y,x] += (p.charge * p.velocity[1] * mu_0) / (4 * np.pi * r)
-                        newAz[z,y,x] += (p.charge * p.velocity[2] * mu_0) / (4 * np.pi * r)
+                        newV[z, y, x] += p.charge / (4 * np.pi * epsilon_0 * r)
+                        
+                        newAx[z, y, x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
+                        newAy[z, y, x] += (p.charge * p.velocity[1] * mu_0) / (4 * np.pi * r)
+                        newAz[z, y, x] += (p.charge * p.velocity[2] * mu_0) / (4 * np.pi * r)
         
-        # update plane fields
-        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az])/timestep
-        self.E = np.gradient(-self.V, self.dx, self.dy, self.dz) - dAdt
-
-        self.B = calculate_curl([newAx,newAy,newAz])
+        # Update plane fields
+        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az]) / timestep
+        self.E[0], self.E[1], self.E[2] = np.gradient(-self.V, self.dx, self.dy, self.dz) - dAdt
+        self.B = calculate_curl([newAx, newAy, newAz], self.dx, self.dy, self.dz)
         
         self.V = newV
         self.Ax = newAx
         self.Ay = newAy
         self.Az = newAz
-    
+
 
 class Integrator:
-    
-    def __init__(self, grid_size: tuple, grid_spacing,path):
+    def __init__(self, grid_size: tuple, grid_spacing=1e-2, path="output.xyz"):
         self.grid_spacing = grid_spacing
         self.grid_size = grid_size
         self.plane = Plane(*grid_size, self.grid_spacing)
@@ -122,139 +158,94 @@ class Integrator:
         self.plane.update_fields(timestep=1e-6)
         
     def simulate(self, dt=1e-11, duration=1e-6):
-        
         if len(self.plane.particles) == 0:
             print("No particles initialized in simulation")
             return
         
-        N_steps = int(T/dt)
+        N_steps = int(duration / dt)
         
         # Grid coordinates scaled to specified spacing
-        x = np.arange(grid_size[0])
-        y = np.arange(grid_size[1])
-        z = np.arange(grid_size[2])
-
+        x = np.arange(self.grid_size[0])
+        y = np.arange(self.grid_size[1])
+        z = np.arange(self.grid_size[2])
         
-        def get_fields(position, E_interpolators, Bx_interp, By_interp):
-            pos = np.array([position[0] % self.grid_size[0], position[1] % self.grid_size[1]])
+        def get_fields(position, E_interpolators: list, B_interpolators: list):
+            pos = np.mod(position, [self.grid_size[0], self.grid_size[1], self.grid_size[2]])
             interp_pos = np.array([pos])
-            Ex, Ey, Ez = [interp(pos)[0] for interp in E_interpolators]
-            
-            return np.array([Ex, Ey, Ez]), np.array([Bx,By,Bz])
+            Ex, Ey, Ez = [interp(interp_pos)[0] for interp in E_interpolators]
+            Bx, By, Bz = [interp(interp_pos)[0] for interp in B_interpolators]
+            return np.array([Ex, Ey, Ez]), np.array([Bx, By, Bz])
+        
+        xyz_file = open(self.path, 'w')
+        times = np.zeros(N_steps + 1)
+        times[0] = 0.0
         
         # Time-stepping loop
         for n in range(N_steps):
+            times[n + 1] = times[n] + dt
             
-            # update interpolators with new fields
-            Ex_interp = RegularGridInterpolator((x,y), plane.Ex.T)
-            Ey_interp = RegularGridInterpolator((x,y), plane.Ex.T)
-        
-            Bx_interp = RegularGridInterpolator((x,y), plane.Bx.T)
-            By_interp = RegularGridInterpolator((x,y), plane.By.T)
+            # Update interpolators with new fields
+            Ex, Ey, Ez = self.plane.E[0], self.plane.E[1], self.plane.E[2]
+            Bx, By, Bz = self.plane.B[0], self.plane.B[1], self.plane.B[2]
             
-            time = n * dt
-            # get fields for each particle
+            Ex_interp = RegularGridInterpolator((x, y, z), Ex)
+            Ey_interp = RegularGridInterpolator((x, y, z), Ey)
+            Ez_interp = RegularGridInterpolator((x, y, z), Ez)
+            
+            Bx_interp = RegularGridInterpolator((x, y, z), Bx)
+            By_interp = RegularGridInterpolator((x, y, z), By)
+            Bz_interp = RegularGridInterpolator((x, y, z), Bz)
+            
+            # Write header for this iteration
+            xyz_file.write(f'{len(self.plane.particles)}\n')
+            xyz_file.write(f'Time={times[n + 1]:.5e} s\n')
+            
+            # Get fields for each particle
             for p in self.plane.particles:
-                E,B = get_fields(p.position)
+                E, B = get_fields(p.position, [Ex_interp, Ey_interp, Ez_interp], [Bx_interp, By_interp, Bz_interp])
                 
-                # calculate force on particle
-                F = particle.charge * (E + )
+                # Calculate acceleration of particle
+                acceleration = (p.charge / p.mass) * (E + cross_product(p.velocity, B))
                 
-                # update particle using Euler's method
+                # Update particle using Euler's method
+                p.velocity += acceleration * dt
+                p.position += p.velocity * dt
                 
-                particle.velocity += (particle.charge)
+                # Write particle position
+                x_pos, y_pos, z_pos = p.position
+                xyz_file.write(f'P {x_pos:.3f} {y_pos:.3f} {z_pos:.3f}\n')
+            
+            # Update fields
+            self.plane.update_fields(timestep=dt)
+        
+        xyz_file.close()
 
 
+if __name__ == "__main__":
+    
+    integrator = Integrator((100,100,100))
+    
+    # Particle Initialization
+    a = Particle(
+        position=[0.5, 0.3, 0.3],         # Start near bottom center
+        velocity=[0.0, 0.0, 0.0],         # Initially at rest
+        charge=-1.602e-19,           # Electron charge
+        mass=9.109e-31               # Electron mass
+    )
+    
+    # Particle Initialization
+    b = Particle(
+        position=[0.8, 0.2, 0.2],
+        velocity=[0.0, 0.0, 0.0],
+        charge=-1.602e-19,
+        mass=9.109e-31
+    )
+    
+    particles = [a,b]
+    
+    integrator.add_particles(particles)
+    
+    integrator.simulate()
+    
+    
 
-
-# Simulation Parameters
-dx = dy = 1e-2  # Grid spacing in meters (1 cm)
-grid_size = (100, 100)  # Grid size (1 m x 1 m)
-
-# Initialize plane
-plane = Plane(*grid_size)
-potential, Ex_grid, Ey_grid = compute_potential_and_field(plane)
-
-# Coordinates for the grid
-x = np.arange(grid_size[1]) * dx  # x-coordinates of grid points
-y = np.arange(grid_size[0]) * dy  # y-coordinates of grid points
-
-# Create interpolators for the electric field components
-Ex_interp = RegularGridInterpolator((x, y), Ex_grid.T)
-Ey_interp = RegularGridInterpolator((x, y), Ey_grid.T)
-
-def get_electric_field(position):
-    pos = np.array(position)
-    if (0 <= pos[0] <= x[-1]) and (0 <= pos[1] <= y[-1]):
-        interp_pos = np.array([pos])
-        Ex = Ex_interp(interp_pos)[0]
-        Ey = Ey_interp(interp_pos)[0]
-        return np.array([Ex, Ey])
-    else:
-        return np.array([0.0, 0.0])
-
-# Particle Initialization
-particle = Particle(
-    position=[0.5, 0.3],         # Start near bottom center
-    velocity=[0.0, 0.0],         # Initially at rest
-    charge=-1.602e-19,           # Electron charge
-    mass=9.109e-31               # Electron mass
-)
-
-# Simulation Parameters
-dt = 1e-11      # Time step (10 picoseconds)
-T = 1e-6        # Total simulation time (100 nanoseconds)
-N_steps = int(T / dt)
-
-
-# Arrays to store positions and velocities for visualization
-positions = np.zeros((N_steps+1, 2))
-velocities = np.zeros((N_steps+1, 2))
-times = np.zeros(N_steps+1)
-
-xyz_filename = 'particle_trajectory.xyz'
-xyz_file = open(xyz_filename, 'w')
-
-# Store initial conditions
-positions[0] = particle.position
-velocities[0] = particle.velocity
-times[0] = 0.0
-
-# Time-stepping loop
-for n in range(N_steps):
-    time = n * dt
-    # Get electric field at particle's position
-    E = get_electric_field(particle.position)
-    # Update particle using simple Euler method
-    particle.velocity += (particle.charge / particle.mass) * E * dt
-    particle.position += particle.velocity * dt
-
-    # Store data
-    positions[n+1] = particle.position
-    velocities[n+1] = particle.velocity
-    times[n+1] = times[n] + dt
-
-    # Write data to XYZ file
-    # For single particle, number of atoms is 1
-    xyz_file.write('1\n')
-    xyz_file.write(f'Time={times[n+1]:.5e} s\n')
-    # Assuming particle is represented as 'P' (could be any symbol)
-    x_pos, y_pos = particle.position
-    z_pos = 0.0  # Since it's a 2D simulation
-    xyz_file.write(f'P {x_pos:.6e} {y_pos:.6e} {z_pos:.6e}\n')
-
-# Close the XYZ file
-xyz_file.close()
-
-# Visualization of particle trajectory
-plt.figure(figsize=(8, 6))
-plt.imshow(potential.T, extent=[x[0], x[-1], y[0], y[-1]], origin='lower', cmap='viridis')
-plt.colorbar(label='Electric Potential (V)')
-plt.plot(positions[:,0], positions[:,1], color='red', linewidth=2, label='Electron Trajectory')
-plt.scatter(positions[0,0], positions[0,1], color='white', label='Start')
-plt.scatter(positions[-1,0], positions[-1,1], color='black', label='End')
-plt.xlabel('x (m)')
-plt.ylabel('y (m)')
-plt.title('Electron Trajectory in Electric Field')
-plt.legend()
-plt.show()
