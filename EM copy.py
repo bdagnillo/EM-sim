@@ -9,40 +9,63 @@ mu_0 = 1.25663706127e-6 #Vacuum permeability in SI units (N/A**2)
 elementary_charge = 1.602e-19
 electron_mass = 9.109e-31
 
+@numba.njit(parallel=True)
+def calculate_curl(F, dx, dy, dz):
+    
+    Fx, Fy, Fz = F[0], F[1], F[2]
+    
+    # Partial derivatives
+    dFz_dy = np.gradient(Fz, dy, axis=1)
+    dFy_dz = np.gradient(Fy, dz, axis=2)
+    dFx_dz = np.gradient(Fx, dz, axis=2)
+    dFz_dx = np.gradient(Fz, dx, axis=0)
+    dFy_dx = np.gradient(Fy, dx, axis=0)
+    dFx_dy = np.gradient(Fx, dy, axis=1)
+    
+    # Curl components
+    curl_x = dFz_dy - dFy_dz
+    curl_y = dFx_dz - dFz_dx
+    curl_z = dFy_dx - dFx_dy
+    
+    # Combine components into a single array
+    curl = np.array([curl_x, curl_y, curl_z])
+    
+    return curl
+
 # Particle Class Definition
 class Particle:
     """
     Represents a charged particle with position, velocity, charge, and mass.
     """
     def __init__(self, position, velocity, charge, mass):
-        self.position = np.array(position, dtype=float)  # Position vector [x, y]
-        self.velocity = np.array(velocity, dtype=float)  # Velocity vector [vx, vy]
+        self.position = np.array(position, dtype=float)  # Position vector [x, y, z]
+        self.velocity = np.array(velocity, dtype=float)  # Velocity vector [vx, vy, vz]
         self.charge = charge  # Charge (Coulombs)
         self.mass = mass      # Mass (kilograms)
         
         
 class Plane:
     
-    def __init__(self, xsize, ysize, grid_spacing):
+    def __init__(self, xsize, ysize, zsize, grid_spacing):
         self.xsize = xsize
         self.ysize = ysize
-        self.dx = self.dy = grid_spacing
+        self.zsize = zsize
+        self.dx = self.dy = self.dz = grid_spacing
         self.particles = []
         
         # electric potential grid
-        self.V = np.zeros(self.ysize,self.xsize)
+        self.V = np.zeros((self.ysize,self.xsize,self.zsize))
         
         # magnetic potential grid
-        self.Ax = np.zeros(self.ysize,self.xsize) 
-        self.Ay = np.zeros(self.ysize,self.xsize)
+        self.Ax = np.zeros((self.ysize,self.xsize,self.zsize)) 
+        self.Ay = np.zeros((self.ysize,self.xsize,self.zsize))
+        self.Az = np.zeros((self.ysize,self.xsize,self.zsize))
         
         # electric field grid
-        self.Ex = np.zeros(self.ysize,self.xsize)
-        self.Ey = np.zeros(self.ysize,self.xsize)
+        self.E = np.zeros((self.ysize,self.xsize,self.zsize))
         
         # magnetic field grid
-        self.Bx = np.zeros(self.ysize,self.xsize)
-        self.By = np.zeros(self.ysize,self.xsize)
+        self.B = np.zeros((self.ysize,self.xsize,self.zsize))
         
     def add_particle(self,particle: Particle):
         self.particles.append(particle)
@@ -50,36 +73,37 @@ class Plane:
     @numba.njit(parallel=True)
     def update_fields(self, timestep):
         
-            
-        
         # electric potential
-        newV = np.zeros(self.ysize, self.xsize)
+        newV = np.zeros((self.ysize,self.xsize,self.zsize))
         
         # magnetic potential
-        newAx = newAy = np.zeros(self.ysize,self.xsize)
+        newAx = newAy = newAz = np.zeros((self.ysize,self.xsize,self.zsize))
         
-        for y in range(self.ysize):
-            for x in range(self.xsize):
-                for p in self.particles:
-                    rx = x - p.position[0]
-                    ry = x - p.position[1]
-                    r = np.sqrt(rx**2 + ry**2)
-                    r[r==0] = 0.5/4 #fractional distance instead of 0, avoids div by zero and smooths out potential
-                    newV[y,x] += p.charge / (4 * np.pi * epsilon_0* r)
-                    
-                    newAx[y,x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
-                    newAy[y,x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
-                    
+        for z in range(self.zsize):
+            for y in range(self.ysize):
+                for x in range(self.xsize):
+                    for p in self.particles:
+                        rx = x - p.position[0]
+                        ry = y - p.position[1]
+                        rz = z - p.position[2]
+                        r = np.sqrt(rx**2 + ry**2 + rz**2)
+                        r[r==0] = 0.5/6 #fractional distance instead of 0, avoids div by zero and smooths out potential
+                        newV[z,y,x] += p.charge / (4 * np.pi * epsilon_0* r)
+                        
+                        newAx[z,y,x] += (p.charge * p.velocity[0] * mu_0) / (4 * np.pi * r)
+                        newAy[z,y,x] += (p.charge * p.velocity[1] * mu_0) / (4 * np.pi * r)
+                        newAz[z,y,x] += (p.charge * p.velocity[2] * mu_0) / (4 * np.pi * r)
         
         # update plane fields
-        dAdt = np.array([newAx - self.Ax, newAy - self.Ay])/timestep
-        self.E = np.gradient(-self.V, dx, dy) - dAdt
+        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az])/timestep
+        self.E = np.gradient(-self.V, self.dx, self.dy, self.dz) - dAdt
 
-        self.B = np.array([newAy - self.Ay])/dx - np.array([newAx - self.Ax])/dy
+        self.B = calculate_curl([newAx,newAy,newAz])
         
         self.V = newV
         self.Ax = newAx
         self.Ay = newAy
+        self.Az = newAz
     
 
 class Integrator:
@@ -108,24 +132,37 @@ class Integrator:
         # Grid coordinates scaled to specified spacing
         x = np.arange(grid_size[0])
         y = np.arange(grid_size[1])
+        z = np.arange(grid_size[2])
+
         
-        # Interpolators
-        Ex_interp = RegularGridInterpolator((x,y), plane.Ex.T)
-        Ey_interp = RegularGridInterpolator((x,y), plane.Ex.T)
-        
-        Bx_interp = RegularGridInterpolator((x,y), plane.Bx.T)
-        By_interp = RegularGridInterpolator((x,y), plane.By.T)
-        
-        def get_fields(position):
+        def get_fields(position, E_interpolators, Bx_interp, By_interp):
             pos = np.array([position[0] % self.grid_size[0], position[1] % self.grid_size[1]])
             interp_pos = np.array([pos])
-            Ex = Ex_interp(pos)[0]
-            Ey = Ey_interp(pos)[0]
-            Bx = Bx_interp(pos)[0]
-            By = By_interp(pos)[0]
-            return np.array([Ex, Ey]), np.array([Bx,By])
+            Ex, Ey, Ez = [interp(pos)[0] for interp in E_interpolators]
+            
+            return np.array([Ex, Ey, Ez]), np.array([Bx,By,Bz])
         
-        def 
+        # Time-stepping loop
+        for n in range(N_steps):
+            
+            # update interpolators with new fields
+            Ex_interp = RegularGridInterpolator((x,y), plane.Ex.T)
+            Ey_interp = RegularGridInterpolator((x,y), plane.Ex.T)
+        
+            Bx_interp = RegularGridInterpolator((x,y), plane.Bx.T)
+            By_interp = RegularGridInterpolator((x,y), plane.By.T)
+            
+            time = n * dt
+            # get fields for each particle
+            for p in self.plane.particles:
+                E,B = get_fields(p.position)
+                
+                # calculate force on particle
+                F = particle.charge * (E + )
+                
+                # update particle using Euler's method
+                
+                particle.velocity += (particle.charge)
 
 
 
