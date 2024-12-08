@@ -5,6 +5,7 @@ import numba
 from copy import deepcopy
 import sys
 from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 # Constants
 epsilon_0 = 8.854187817e-12  # Vacuum permittivity in SI units (F/m)
@@ -238,7 +239,7 @@ class Integrator:
         plt.tight_layout()
         plt.show()
     
-    def plot3dfield(self,n: int):
+    def plot3dfield(self,n: int,showfig=True):
         """
         Plot two 3D vector fields side by side.
 
@@ -249,30 +250,27 @@ class Integrator:
         - title2: Title for the second plot.
         """
         fig = plt.figure(figsize=(14, 6))
-        
+
+        # Generate a 3D grid in proper order
         x, y, z = np.arange(self.grid_size[0]), np.arange(self.grid_size[1]), np.arange(self.grid_size[2])
-        X, Y, Z = np.meshgrid(x, y, z)
-        
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')  # Use 'ij' indexing for proper dimensional mapping
+
         # Plot first vector field
         ax1 = fig.add_subplot(121, projection='3d')
         U1, V1, W1 = self.plane.E
-        ax1.quiver(X[::n], Y[::n], Z[::n], U1[::n], V1[::n], W1[::n], length=0.1, normalize=True)
+        ax1.quiver(
+            X[::n, ::n, ::n], Y[::n, ::n, ::n], Z[::n, ::n, ::n], 
+            U1[::n, ::n, ::n], V1[::n, ::n, ::n], W1[::n, ::n, ::n], 
+            length=5, normalize=True
+        )
         ax1.set_title("Electric Field (E)")
         ax1.set_xlabel("X")
         ax1.set_ylabel("Y")
         ax1.set_zlabel("Z")
-        
-        # Plot second vector field
-        ax2 = fig.add_subplot(122, projection='3d')
-        U2, V2, W2 = self.plane.B
-        ax2.quiver(X, Y, Z, U2, V2, W2, length=0.1, normalize=True)
-        ax2.set_title("Magnetic Field (B)")
-        ax2.set_xlabel("X")
-        ax2.set_ylabel("Y")
-        ax2.set_zlabel("Z")
-        
+
         plt.tight_layout()
-        plt.show()
+        if showfig:
+            plt.show()
         
     def create_particle_shapes(self, shape, scale):
             
@@ -280,7 +278,7 @@ class Integrator:
                 return
     
         
-    def simulate(self, dt=1e-6, N_steps = 10):
+    def simulate(self, dt=1e-6, N_steps = 10, save_animation=False):
         if len(self.plane.particles) == 0:
             print("No particles initialized in simulation")
             return
@@ -315,10 +313,51 @@ class Integrator:
         times = np.zeros(N_steps + 1)
         times[0] = 0.0
         
+        if save_animation:
+                # Setup the figure
+            self.fig = plt.figure(figsize=(14, 6))
+            x, y, z = np.arange(self.grid_size[0]), np.arange(self.grid_size[1]), np.arange(self.grid_size[2])
+            X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+            m = 10
+            # First subplot for the electric field (E)
+            self.ax1 = self.fig.add_subplot(111, projection='3d')
+            U1, V1, W1 = self.plane.E
+            self.quiver1 = self.ax1.quiver(
+            X[::m, ::m, ::m], Y[::m, ::m, ::m], Z[::m, ::m, ::m], 
+            U1[::m, ::m, ::m], V1[::m, ::m, ::m], W1[::m, ::m, ::m], 
+            length=5, normalize=True
+            )
+            self.ax1.set_title("Electric Field (E)")
+            self.ax1.set_xlabel("X")
+            self.ax1.set_ylabel("Y")
+            self.ax1.set_zlabel("Z")
+            self.ax1.set_xlim(self.plane.xsize)
+            self.ax1.set_ylim(self.plane.ysize)
+            self.ax1.set_zlim(self.plane.zsize)
+        
+        def update():
+            if self.quiver1 is not None:
+                try:
+                    self.quiver1.remove()
+                except:
+                    pass
+            m = 10
+            U1, V1, W1 = self.plane.E
+            x, y, z = np.arange(self.grid_size[0]), np.arange(self.grid_size[1]), np.arange(self.grid_size[2])
+            X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+            
+            # self.quiver1 = self.ax1.quiver(
+            # X[::m, ::m, ::m], Y[::m, ::m, ::m], Z[::m, ::m, ::m], 
+            # U1[::m, ::m, ::m], V1[::m, ::m, ::m], W1[::m, ::m, ::m], 
+            # length=5, normalize=True
+            # )
+            self.quiver11 = self.ax1.scatter([100],[100],[100],s=10)
+            return self.quiver1,
+        
         xyz_file = open(self.path, 'w')
         print("Starting simulation")
-        # Time-stepping loop
-        for n in range(N_steps):
+        
+        def loop(n):
             times[n + 1] = times[n] + dt
             
             # Update interpolators with new fields
@@ -376,17 +415,28 @@ class Integrator:
                 xyz_file.write(f'P {x_pos:.6f} {y_pos:.6f} {z_pos:.6f}\n')
                 # xyz_file.close()
                 
-                print(f"Iteration: {n}, average velocity: {self.average_velocity}", end="\r")
+                print(f"Step: {n}, average velocity: {self.average_velocity}", end="\r")
             
             # Update fields
             self.plane.update_fields(timestep=dt)
             
+            if save_animation:
+                return update()
             
             if self.plot_every is not None and n % int(self.plot_every) == 0:
                 self.plot2dslice()
                 # self.plot3dfield(10) # run if you want to crash your pc
                 
         
+        if save_animation:
+            self.anim = FuncAnimation(self.fig, loop, frames=N_steps, blit=False)
+            writer = FFMpegWriter(fps=1)
+            self.anim.save('animation.mp4', writer=writer)
+        else:
+        # Time-stepping loop
+            for n in range(N_steps):
+                loop(n)
+            
         xyz_file.close()
         print("\nSimulation complete")
 
@@ -395,7 +445,7 @@ if __name__ == "__main__":
     
     plot_every = None
     if len(sys.argv) > 1:
-        plot_every = sys.argv[1]
+        plot_every = int(sys.argv[1])
     
     integrator = Integrator((200,200,200),grid_spacing=0.5, plot_every=plot_every)
     
@@ -426,7 +476,7 @@ if __name__ == "__main__":
     integrator.add_particles(particles)
     
     integrator.initialize_fields()
-    integrator.simulate(dt=0.5e-6,N_steps=400)
+    integrator.simulate(dt=0.5e-6,N_steps=10,save_animation=True)
     
     
 
