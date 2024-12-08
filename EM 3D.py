@@ -124,47 +124,48 @@ def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz):
 
 
 class Plane:
-    def __init__(self, xsize, ysize, zsize, grid_spacing):
+    def __init__(self, xsize, ysize, zsize, grid_spacing, dtype=np.float64):
         self.xsize = xsize
         self.ysize = ysize
         self.zsize = zsize
         self.dx = self.dy = self.dz = grid_spacing
+        self.dtype = dtype
         self.particles = []
         
         # Electric potential grid
-        self.V = np.zeros((self.zsize, self.ysize, self.xsize))
+        self.V = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
         
         # Magnetic potential grid
-        self.Ax = np.zeros((self.zsize, self.ysize, self.xsize))
-        self.Ay = np.zeros((self.zsize, self.ysize, self.xsize))
-        self.Az = np.zeros((self.zsize, self.ysize, self.xsize))
+        self.Ax = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
+        self.Ay = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
+        self.Az = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
         
         # Electric field grid
-        self.E = np.zeros((3, self.zsize, self.ysize, self.xsize))
+        self.E = np.zeros((3, self.zsize, self.ysize, self.xsize),dtype=self.dtype)
         
         # Magnetic field grid
-        self.B = np.zeros((3, self.zsize, self.ysize, self.xsize))
+        self.B = np.zeros((3, self.zsize, self.ysize, self.xsize),dtype=self.dtype)
         
     def add_particle(self, particle: Particle):
         self.particles.append(particle)
         
     def update_fields(self, timestep):
         # Create empty grids for new potentials
-        newV = np.zeros_like(self.V)
-        newAx = np.zeros_like(self.Ax)
-        newAy = np.zeros_like(self.Ay)
-        newAz = np.zeros_like(self.Az)
+        newV = np.zeros_like(self.V,dtype=np.float16)
+        newAx = np.zeros_like(self.Ax,dtype=np.float16)
+        newAy = np.zeros_like(self.Ay,dtype=np.float16)
+        newAz = np.zeros_like(self.Az,dtype=np.float16)
         
         # Convert particle data into a structured array for Numba
         particle_array = np.array([(p.charge, p.position, p.velocity) for p in self.particles],
-                    dtype=[('charge', np.float64), ('position', np.float64, 3), ('velocity', np.float64, 3)])
+                    dtype=[('charge', np.float32), ('position', np.float32, 3), ('velocity', np.float32, 3)])
         
         # Compute potentials using Numba-accelerated function
         newV, newAx, newAy, newAz = compute_potentials(particle_array, self.xsize, self.ysize, self.zsize, 
                         self.dx, self.dy, self.dz)
         
         # Update plane fields
-        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az]) / timestep
+        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az],dtype=np.float32) / timestep
         self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx) - dAdt
         # self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx)
         self.B = calculate_curl([newAx, newAy, newAz], self.dx, self.dy, self.dz)
@@ -237,7 +238,7 @@ class Integrator:
         plt.tight_layout()
         plt.show()
     
-    def plot3dfield(self):
+    def plot3dfield(self,n: int):
         """
         Plot two 3D vector fields side by side.
 
@@ -255,7 +256,7 @@ class Integrator:
         # Plot first vector field
         ax1 = fig.add_subplot(121, projection='3d')
         U1, V1, W1 = self.plane.E
-        ax1.quiver(X, Y, Z, U1, V1, W1, length=0.1, normalize=True)
+        ax1.quiver(X[::n], Y[::n], Z[::n], U1[::n], V1[::n], W1[::n], length=0.1, normalize=True)
         ax1.set_title("Electric Field (E)")
         ax1.set_xlabel("X")
         ax1.set_ylabel("Y")
@@ -272,6 +273,12 @@ class Integrator:
         
         plt.tight_layout()
         plt.show()
+        
+    def create_particle_shapes(self, shape, scale):
+            
+            if shape == "square":
+                return
+    
         
     def simulate(self, dt=1e-6, N_steps = 10):
         if len(self.plane.particles) == 0:
@@ -292,12 +299,18 @@ class Integrator:
             return np.array([Ex, Ey, Ez]), np.array([Bx, By, Bz])
 
         def get_fields_nointerp(position,E,B):
-            pos = np.mod(position, [self.grid_size[0] * self.grid_spacing, self.grid_size[1] * self.grid_spacing, self.grid_size[2]] * self.grid_spacing)
-            pos = np.array(pos, dtype=int)
+            pos = np.mod(position, [self.grid_size[0] * self.grid_spacing, self.grid_size[1] * self.grid_spacing, self.grid_size[2] * self.grid_spacing])
+            pos = np.array(pos/self.grid_spacing, dtype=int)
             Ex, Ey, Ez = np.array([E[0][pos[0],pos[1],pos[2]], E[1][pos[0],pos[1],pos[2]], E[2][pos[0],pos[1],pos[2]]])
             Bx, By, Bz = np.array([B[0][pos[0],pos[1],pos[2]], B[1][pos[0],pos[1],pos[2]], B[2][pos[0],pos[1],pos[2]]])
             return np.array([Ex, Ey, Ez]), np.array([Bx, By, Bz])
 
+        def reflect(v_in: np.ndarray, n: np.ndarray, e):
+            n = n / np.linalg.norm(n)
+            v_n = np.dot(v_in, n) * n
+            v_t = v_in - v_n
+            v_out = v_t - e * v_n
+            return v_out
 
         times = np.zeros(N_steps + 1)
         times[0] = 0.0
@@ -333,15 +346,26 @@ class Integrator:
                 E,B = get_fields_nointerp(p.position,self.plane.E,self.plane.B)
                 
                 # Calculate acceleration of particle
-                # acceleration = (p.charge / p.mass) * (E + cross_product(p.velocity, B))
-                acceleration = (p.charge / p.mass) * (E)
+                acceleration = (p.charge / p.mass) * (E + cross_product(p.velocity, B))
+                # acceleration = (p.charge / p.mass) * (E)
                 
                 # Update particle using Euler's method
                 p.velocity += acceleration * dt
                 p.position += p.velocity * dt
                 
-                # periodic boundary
-                p.position = np.mod(p.position, [self.grid_size[0] * self.grid_spacing, self.grid_size[1] * self.grid_spacing, self.grid_size[2]] * self.grid_spacing)
+                
+                def apply_boundary(box_length, type="periodic"):
+                    if type == "periodic":
+                        for p in self.plane.particles:
+                            for i in range(len(p.position)):  # Loop over x, y, z components
+                                # Wrap the position to stay within [0, L)
+                                if p.position[i] < 0:
+                                    p.position[i] += box_length
+                                elif p.position[i] >= box_length:
+                                    p.position[i] -= box_length
+                
+                apply_boundary(self.plane.xsize,"periodic")
+                
                 
                 # plt.scatter([p.position[0] for p in self.plane.particles], [p.position[1] for p in self.plane.particles])
                 # plt.show()
@@ -360,11 +384,11 @@ class Integrator:
             
             if self.plot_every is not None and n % int(self.plot_every) == 0:
                 self.plot2dslice()
-                # self.plot3dfield() # run if you want to crash your pc
+                # self.plot3dfield(10) # run if you want to crash your pc
                 
         
         xyz_file.close()
-        print("Simulation complete")
+        print("\nSimulation complete")
 
 
 if __name__ == "__main__":
@@ -373,7 +397,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         plot_every = sys.argv[1]
     
-    integrator = Integrator((200,200,200),grid_spacing=1, plot_every=plot_every)
+    integrator = Integrator((200,200,200),grid_spacing=0.5, plot_every=plot_every)
     
     # Particle Initialization
     a = Particle(
@@ -398,8 +422,7 @@ if __name__ == "__main__":
         mass=electron_mass
     )
     
-    particles = [a,b]
-    
+    particles = [a,b,c]    
     integrator.add_particles(particles)
     
     integrator.initialize_fields()
