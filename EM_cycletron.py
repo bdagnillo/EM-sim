@@ -15,6 +15,8 @@ class Particle:
         self.mass = mass
 
 def deposit_charge_current_3d(particles, rho, J, dx, dt):
+    # For a single particle test, this won't significantly change anything
+    # since there's no charge imbalance to drive fields, but we keep it for consistency.
     nx, ny, nz = rho.shape
     rho[...] = 0.0
     J[...] = 0.0
@@ -31,7 +33,6 @@ def deposit_charge_current_3d(particles, rho, J, dx, dt):
         fy = y_cell - j0
         fz = z_cell - k0
         
-        # Weights
         wx0 = 1 - fx
         wx1 = fx
         wy0 = 1 - fy
@@ -88,7 +89,6 @@ def boris_pusher_3d(particles, E, B, dx, dt):
         wz1 = fz
 
         def tricubic(field):
-            # Actually trilinear interpolation
             val = (field[i0,j0,k0]*wx0*wy0*wz0 +
                    field[i1,j0,k0]*wx1*wy0*wz0 +
                    field[i0,j1,k0]*wx0*wy1*wz0 +
@@ -112,15 +112,14 @@ def boris_pusher_3d(particles, E, B, dx, dt):
         v_prime = v_minus + np.cross(v_minus, t)
         v_plus = v_minus + (np.cross(v_prime, t)*2.0/(1+t2))
         
-        # final velocity
         v_new = v_plus + qmdt*E_part
         
         p.velocity = v_new
         p.position += v_new * dt
-        # periodic
-        p.position[0] %= (nx*dx)
-        p.position[1] %= (ny*dx)
-        p.position[2] %= (nz*dx)
+        # If you want to remove periodic BC, comment out these lines:
+        # p.position[0] %= (nx*dx)
+        # p.position[1] %= (ny*dx)
+        # p.position[2] %= (nz*dx)
 
 def maxwell_fdtd_3d(E, B, rho, J, dt, dx):
     nx, ny, nz = E.shape[1], E.shape[2], E.shape[3]
@@ -131,24 +130,20 @@ def maxwell_fdtd_3d(E, B, rho, J, dt, dx):
     def shift(arr, dx, axis):
         return (np.roll(arr, -1, axis=axis) - np.roll(arr, 1, axis=axis)) / (2*dx)
 
-    # After selecting Ex, Ey, Ez each is (nx, ny, nz)
-    # Axes: 0 -> x, 1 -> y, 2 -> z
+    # For a uniform B field and no net currents, fields won't change much.
+    # Still, we do the calculation for completeness.
 
-    # curl E = ∇ × E
-    # For 3D arrays (nx, ny, nz):
-    # d/dx -> axis=0, d/dy -> axis=1, d/dz -> axis=2
-    dEz_dy = shift(Ez, dx, 1)  # derivative of Ez w.r.t y
-    dEy_dz = shift(Ey, dx, 2)  # derivative of Ey w.r.t z
-    dEx_dz = shift(Ex, dx, 2)  # derivative of Ex w.r.t z
-    dEz_dx = shift(Ez, dx, 0)  # derivative of Ez w.r.t x
-    dEy_dx = shift(Ey, dx, 0)  # derivative of Ey w.r.t x
-    dEx_dy = shift(Ex, dx, 1)  # derivative of Ex w.r.t y
+    dEz_dy = shift(Ez, dx, 1)
+    dEy_dz = shift(Ey, dx, 2)
+    dEx_dz = shift(Ex, dx, 2)
+    dEz_dx = shift(Ez, dx, 0)
+    dEy_dx = shift(Ey, dx, 0)
+    dEx_dy = shift(Ex, dx, 1)
 
     curlE_x = dEz_dy - dEy_dz
     curlE_y = dEx_dz - dEz_dx
     curlE_z = dEy_dx - dEx_dy
 
-    # curl B = ∇ × B
     dBz_dy = shift(Bz, dx, 1)
     dBy_dz = shift(By, dx, 2)
     dBx_dz = shift(Bx, dx, 2)
@@ -173,96 +168,47 @@ def maxwell_fdtd_3d(E, B, rho, J, dt, dx):
 
     return E_new, B_new
 
-
-# Simulation parameters
+# Cyclotron test setup
 nx, ny, nz = 32, 32, 32
 dx = 1e-2
-dt = dx/(2*c)*0.1
-steps = 100000
-
-# Initialize fields
+dt = dx/(2*c)*0.01
+steps = 1000000
+# Initialize fields: zero E, uniform B along z
 E = np.zeros((3, nx, ny, nz))
 B = np.zeros((3, nx, ny, nz))
+B0 = 1e-3  # Tesla
+B[2,:,:,:] = B0  # B in z-direction
+
 rho = np.zeros((nx, ny, nz))
 J = np.zeros((3, nx, ny, nz))
 
-# Physical constants for a hydrogen plasma (example)
-m_e = 9.11e-31        # electron mass
-q_e = -1.602e-19       # electron charge
-m_i = 1.67e-27         # proton mass (~1836 times electron mass)
-q_i = 1.602e-19         # proton charge
+# Single electron
+m_e = 9.11e-31
+q_e = -1.602e-19
+N = 1
 
-# Super-particle scaling factors
-# Suppose 1 super-electron represents N_e real electrons
-# and 1 super-ion represents N_i real ions
-N_e = 1e9   # each electron super-particle = 1e9 real electrons
-N_i = 1e9   # each ion super-particle = 1e9 real ions
+# Place particle in center
+x0 = (nx*dx)/2
+y0 = (ny*dx)/2
+z0 = (nz*dx)/2
 
-# Effective super-particle charge and mass
-Q_e = N_e * q_e
-M_e = N_e * m_e
-Q_i = N_i * q_i
-M_i = N_i * m_i
+# Initial velocity perpendicular to B (along x)
+v_perp = 1e6 # m/s
+particle = Particle([x0, y0, z0], [v_perp, 0.0, 0.0], q_e, m_e)
+particles = [particle]
 
-# Number of particles for simulation
-N_electrons = 1000
-N_ions = 1000
+output_filename = "cyclotron_positions.xyz"
 
-particles = []
-
-# Initialize electrons
-for i in range(N_electrons):
-    # Random initial positions and velocities
-    x = np.random.rand() * nx*dx
-    y = np.random.rand() * ny*dx
-    z = np.random.rand() * nz*dx
-    
-    # e.g. a Maxwellian velocity distribution or a given drift
-    vx = np.random.randn()*1e5
-    vy = np.random.randn()*1e5
-    vz = np.random.randn()*1e5
-    
-    # Use Q_e, M_e for electron super-particle
-    particles.append(Particle([x, y, z], [vx, vy, vz], Q_e, M_e))
-
-# Initialize ions
-for i in range(N_ions):
-    x = np.random.rand() * nx*dx
-    y = np.random.rand() * ny*dx
-    z = np.random.rand() * nz*dx
-    
-    # Ions usually move slower (heavier mass)
-    vx = np.random.randn()*1e3
-    vy = np.random.randn()*1e3
-    vz = np.random.randn()*1e3
-    
-    # Use Q_i, M_i for ion super-particle
-    particles.append(Particle([x, y, z], [vx, vy, vz], Q_i, M_i))
-
-output_filename = "positions.xyz"
-
-# Run the simulation loop
 with open(output_filename, "w") as f:
     for step in range(steps):
-        # Deposit charge and current
         deposit_charge_current_3d(particles, rho, J, dx, dt)
-
-        # Update fields using Maxwell-FDTD
         E, B = maxwell_fdtd_3d(E, B, rho, J, dt, dx)
-
-        # Move particles with the Boris pusher
         boris_pusher_3d(particles, E, B, dx, dt)
         
-        # Write positions in XYZ format
-        # XYZ format:
-        # First line: number of particles
-        # Second line: comment (e.g. "Step X")
-        # Then N lines of: AtomSymbol x y z
-        f.write(f"{N_electrons+N_ions}\n")
+        f.write("1\n")
         f.write(f"Step {step}\n")
-        for p in particles:
-            x, y, z = p.position
-            f.write(f"X {x:.6e} {y:.6e} {z:.6e}\n")
+        x, y, z = particles[0].position
+        f.write(f"X {x:.6e} {y:.6e} {z:.6e}\n")
         
-        # Print to console to show progress
-        print(f"Step {step} completed.")
+        if step % 100 == 0:
+            print(f"Step {step}: x={x:.3e}, y={y:.3e}, z={z:.3e}")
