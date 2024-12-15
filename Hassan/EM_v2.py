@@ -258,11 +258,56 @@ def maxwell_fdtd_3d(E, B, rho, J, dt, dx):
 
     return E, B
 
+@njit(parallel=True)
+def maxwell_fdtd_3d_v2(E, B, rho, J, dt, dx):
+    c = 3*1e8  # Assume natural units where c = 1
+
+    Nx, Ny, Nz = E.shape[1], E.shape[2], E.shape[3]
+
+    # Update magnetic field (Faraday's Law)
+    for i in prange(Nx):
+        for j in range(Ny):
+            for k in range(Nz):
+                B[0, i, j, k] -= dt * (
+                    (E[2, i, (j + 1) % Ny, k] - E[2, i, j, k]) / dx -
+                    (E[1, i, j, (k + 1) % Nz] - E[1, i, j, k]) / dx
+                )
+                B[1, i, j, k] -= dt * (
+                    (E[0, i, j, (k + 1) % Nz] - E[0, i, j, k]) / dx -
+                    (E[2, (i + 1) % Nx, j, k] - E[2, i, j, k]) / dx
+                )
+                B[2, i, j, k] -= dt * (
+                    (E[1, (i + 1) % Nx, j, k] - E[1, i, j, k]) / dx -
+                    (E[0, i, (j + 1) % Ny, k] - E[0, i, j, k]) / dx
+                )
+
+    # Update electric field (Ampere's Law)
+    for i in prange(Nx):
+        for j in range(Ny):
+            for k in range(Nz):
+                E[0, i, j, k] += dt * (
+                    c**2 * ((B[2, i, (j + 1) % Ny, k] - B[2, i, j, k]) / dx -
+                            (B[1, i, j, (k + 1) % Nz] - B[1, i, j, k]) / dx) -
+                    J[0, i, j, k] + rho[i, j, k] / dt
+                )
+                E[1, i, j, k] += dt * (
+                    c**2 * ((B[0, i, j, (k + 1) % Nz] - B[0, i, j, k]) / dx -
+                            (B[2, (i + 1) % Nx, j, k] - B[2, i, j, k]) / dx) -
+                    J[1, i, j, k] + rho[i, j, k] / dt
+                )
+                E[2, i, j, k] += dt * (
+                    c**2 * ((B[1, (i + 1) % Nx, j, k] - B[1, i, j, k]) / dx -
+                            (B[0, i, (j + 1) % Ny, k] - B[0, i, j, k]) / dx) -
+                    J[2, i, j, k] + rho[i, j, k] / dt
+                )
+
+    return E, B
+
 
 # Simulation parameters
 nx, ny, nz = 32, 32, 32
-dx = 1e-4
-dt = dx/(2*c)*0.001
+dx = 1e-15
+dt = dx/(2*c)
 steps = 10000000
 
 E = np.zeros((3, nx, ny, nz), dtype=np.float64)
@@ -270,37 +315,52 @@ B = np.zeros((3, nx, ny, nz), dtype=np.float64)
 rho = np.zeros((nx, ny, nz), dtype=np.float64)
 J = np.zeros((3, nx, ny, nz), dtype=np.float64)
 
-#m_e = 9.11e-31
-#q_e = -1.602e-19
-m_e =  1.67e-27       # proton mass (~1836 times electron mass)
-q_e = 1.602e-19         # proton charge
+m_e = 9.11e-31
+q_e = -1.602e-19
+m_p =  1.67e-27       # proton mass (~1836 times electron mass)
+q_p = 1.602e-19         # proton charge
 N_e = 1e9
 Q_e = N_e * q_e
 M_e = N_e * m_e
+a_0 = 5.29e-11 # bohr radius
 
-N_electrons = 100
-N_particles = N_electrons
+N_electrons = 1
+N_protons = 1
+N_particles = 2
 
 positions = np.zeros((N_particles, 3), dtype=np.float64)
 velocities = np.zeros((N_particles, 3), dtype=np.float64)
 charges = np.zeros(N_particles, dtype=np.float64)
 masses = np.zeros(N_particles, dtype=np.float64)
 
-for i in range(N_electrons):
-    x = np.random.rand()*nx*dx
-    y = np.random.rand()*ny*dx
-    z = np.random.rand()*nz*dx
-    vx = np.random.randn()*1e5
-    vy = np.random.randn()*1e5
-    vz = np.random.randn()*1e5
-    positions[i,0] = x
-    positions[i,1] = y
-    positions[i,2] = z
-    velocities[i,0] = vx
-    velocities[i,1] = vy
-    velocities[i,2] = vz
-    charges[i] = Q_e
-    masses[i] = M_e
+# for i in range(N_electrons):
+#     x = np.random.rand()*nx*dx
+#     y = np.random.rand()*ny*dx
+#     z = np.random.rand()*nz*dx
+#     vx = np.random.randn()*1e5
+#     vy = np.random.randn()*1e5
+#     vz = np.random.randn()*1e5
+#     positions[i,0] = x
+#     positions[i,1] = y
+#     positions[i,2] = z
+#     velocities[i,0] = vx
+#     velocities[i,1] = vy
+#     velocities[i,2] = vz
+#     charges[i] = Q_e
+#     masses[i] = M_e
+
+# proton
+positions[0] = [nx*dx/2, ny*dx/2, nz*dx/2]
+velocities[0] = [0,0,0]
+charges[0] = q_p
+masses[0] = m_p
+# electron
+orbit_velocity = np.sqrt(q_e**2/(4 * np.pi * epsilon_0 * a_0 * m_e))
+positions[1] = [nx*dx/2 + a_0, ny*dx/2, nz*dx/2]
+velocities[1] = [0,orbit_velocity,0]
+charges[1] = q_p
+masses[1] = m_p
+
 
 output_filename = "positions.xyz"
 
@@ -308,10 +368,11 @@ output_filename = "positions.xyz"
 with open(output_filename, "w") as f:
     for step in range(steps):
         deposit_charge_current_3d(positions, velocities, charges, rho, J, dx, dt)
-        E, B = maxwell_fdtd_3d(E, B, rho, J, dt, dx)
+        # E, B = maxwell_fdtd_3d(E, B, rho, J, dt, dx)
+        E, B = maxwell_fdtd_3d_v2(E, B, rho, J, dt, dx)
         boris_pusher_3d(positions, velocities, charges, masses, E, B, dx, dt)
     
-        if step % 1000 == 0:
+        if step % 500 == 0:
             f.write(f"{N_particles}\n")
             f.write(f"Step {step}\n")
             for i in range(N_particles):

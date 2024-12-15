@@ -151,6 +151,7 @@ class Plane:
         self.dx = self.dy = self.dz = self.grid_spacing = grid_spacing
         self.dtype = dtype
         self.particles = []
+        self.time = 0
         
         # Electric potential grid
         self.V = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
@@ -161,15 +162,127 @@ class Plane:
         self.Az = np.zeros((self.zsize, self.ysize, self.xsize),dtype=self.dtype)
         
         # Electric field grid
-        self.E = np.zeros((3, self.zsize, self.ysize, self.xsize),dtype=self.dtype)
+        self.E = np.zeros((3, self.zsize, self.ysize, self.xsize))
         
         # Magnetic field grid
-        self.B = np.zeros((3, self.zsize, self.ysize, self.xsize),dtype=self.dtype)
+        self.B = np.zeros((3, self.zsize, self.ysize, self.xsize))
         
     def add_particle(self, particle: Particle):
         self.particles.append(particle)
         
     def update_fields(self, timestep):
+        """
+        Update the electric and magnetic fields using retarded potentials for causality.
+        """
+        # Create empty grids for the new potentials
+        newV = np.zeros_like(self.V, dtype=np.float64)
+        newAx = np.zeros_like(self.Ax, dtype=np.float64)
+        newAy = np.zeros_like(self.Ay, dtype=np.float64)
+        newAz = np.zeros_like(self.Az, dtype=np.float64)
+        
+        # Speed of light
+        c = 3e8  # m/s
+        
+        # Loop over particles to calculate the retarded potentials
+        for p in self.particles:
+            # Compute the retarded potentials for each grid point
+            for ix in range(self.xsize):
+                for iy in range(self.ysize):
+                    for iz in range(self.zsize):
+                        # Position of the grid point
+                        grid_position = np.array([ix * self.dx, iy * self.dy, iz * self.dz])
+                        
+                        # Compute the distance between the particle and the grid point
+                        r_vec = grid_position - p.position
+                        r = np.linalg.norm(r_vec)  # Magnitude of the distance
+                        
+                        # Compute the retarded time
+                        t_retarded = self.time - r / c
+                        
+                        # Evaluate the particle's position and velocity at the retarded time
+                        # Assuming linear motion for simplicity (modify for other motion):
+                        p_retarded_position = p.position + p.velocity * (t_retarded - self.time)
+                        v_retarded = p.velocity  # Velocity assumed constant
+                        
+                        # Recompute distance vector at the retarded position
+                        r_vec = grid_position - p_retarded_position
+                        r = np.linalg.norm(r_vec) + 1e-12  # Avoid division by zero
+                        
+                        # Compute the scalar and vector potentials
+                        newV[ix, iy, iz] += p.charge / (4 * np.pi * 8.854e-12 * r)
+                        newAx[ix, iy, iz] += p.charge * v_retarded[0] / (4 * np.pi * 8.854e-12 * c * r)
+                        newAy[ix, iy, iz] += p.charge * v_retarded[1] / (4 * np.pi * 8.854e-12 * c * r)
+                        newAz[ix, iy, iz] += p.charge * v_retarded[2] / (4 * np.pi * 8.854e-12 * c * r)
+        
+        # Update the fields
+        dAdt = np.array([(newAx - self.Ax), (newAy - self.Ay), (newAz - self.Az)], dtype=np.float64) / timestep
+        gradV = np.array(np.gradient(-newV, self.dx), dtype=np.float64)
+        
+        # Electric field: E = -grad(V) - dA/dt
+        self.E[0] = gradV[0] - dAdt[0]
+        self.E[1] = gradV[1] - dAdt[1]
+        self.E[2] = gradV[2] - dAdt[2]
+        
+        # Magnetic field: B = curl(A)
+        self.B = calculate_curl([newAx, newAy, newAz], self.dx, self.dy, self.dz)
+        
+        # Update stored potentials
+        self.V = newV
+        self.Ax = newAx
+        self.Ay = newAy
+        self.Az = newAz
+        
+    def radial_gradient(self, array, position):
+        # Create a grid of indices
+        x, y, z = np.indices(array.shape)
+        x, y, z = x * self.dx, y * self.dy, z *self.dz
+        
+        # center = np.array(center, dtype=int)
+        center = position
+        # Calculate the distance from the center (x, y, z) for each point in the array
+        distances = np.sqrt((x - center[0])**2 + (y - center[1])**2 + (z - center[2])**2)
+        
+        # Calculate the gradients along each axis
+        grad_x, grad_y, grad_z = np.gradient(array)
+        
+        # Radial component of the gradient (directional gradient along the radial vector)
+        grad_radial = (grad_x * (x - center[0]) + grad_y * (y - center[1]) + grad_z * (z - center[2])) / distances
+        
+        # Replace NaN values (for the center point) with zero (since gradient at the center is undefined)
+        grad_radial[np.isnan(grad_radial)] = 0
+        
+        return grad_radial
+    
+    def spherical_gradient(self, array, position):
+        x,y,z = position
+        
+        # Define the step size for numerical differentiation
+        step = 1
+        
+        # Gradient in Cartesian coordinates
+        grad_x = (array[x + step, y, z] - array[x - step, y, z]) / (2 * step)
+        grad_y = (array[x, y + step, z] - array[x, y - step, z]) / (2 * step)
+        grad_z = (array[x, y, z + step] - array[x, y, z - step]) / (2 * step)
+        
+        # Calculate the spherical gradient components
+        r = np.sqrt(x**2 + y**2 + z**2)  # Radial distance from the origin
+        theta = np.arccos(z / r)  # Polar angle
+        phi = np.arctan2(y, x)  # Azimuthal angle
+        
+        # Gradient in spherical coordinates (radial, polar, azimuthal)
+        grad_r = grad_x * (x / r) + grad_y * (y / r) + grad_z * (z / r)
+        grad_theta = grad_x * (x * z) / (r**2 * np.sin(theta)) + grad_y * (y * z) / (r**2 * np.sin(theta)) - grad_z / r
+        grad_phi = -grad_x * (y / r**2) + grad_y * (x / r**2)
+        
+        # Transform spherical gradient back to Cartesian coordinates
+        grad_cartesian_x = grad_r * np.sin(theta) * np.cos(phi) + grad_theta * np.cos(theta) * np.cos(phi) - grad_phi * np.sin(phi)
+        grad_cartesian_y = grad_r * np.sin(theta) * np.sin(phi) + grad_theta * np.cos(theta) * np.sin(phi) + grad_phi * np.cos(phi)
+        grad_cartesian_z = grad_r * np.cos(theta) - grad_theta * np.sin(theta)
+        
+        print(grad_cartesian_x.shape)
+        return np.array([grad_cartesian_x, grad_cartesian_y, grad_cartesian_z])
+    
+    def initialize_fields(self):
         # Create empty grids for new potentials
         newV = np.zeros_like(self.V,dtype=np.float64)
         newAx = np.zeros_like(self.Ax,dtype=np.float64)
@@ -180,17 +293,12 @@ class Plane:
             out = compute_potentials(p.position, p.charge, p.velocity, self.xsize, self.ysize, self.zsize, 
                         self.dx, self.dy, self.dz)
             newV += out[0]
-            newAx += out[1]
-            newAy += out[2]
-            newAz += out[3]
-        
-        
-        # Update plane fields
-        dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az],dtype=np.float32) / timestep
-        self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx) - dAdt
-        # self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx)
-        self.B = calculate_curl([newAx, newAy, newAz], self.dx, self.dy, self.dz)
-        
+            
+            # update field
+            indices = p.position * np.array([1/self.dx, 1/self.dy, 1/self.dz])
+
+            self.E += self.spherical_gradient(newV, np.array(indices, dtype=int))
+
         
         
         self.V = newV
@@ -212,7 +320,7 @@ class Integrator:
             self.plane.add_particle(p)
     
     def initialize_fields(self):
-        self.plane.update_fields(timestep=1e-20)
+        self.plane.initialize_fields()
         
 
     def plot2dslice(self):
@@ -412,7 +520,9 @@ class Integrator:
                 self.plot2dslice()
                 # self.plot3dfield(10) # run if you want to crash your pc
             
+            
             times[n + 1] = times[n] + dt
+            self.plane.time = times[n]
             
             print(self.plane.particles[0].position)
             
@@ -492,7 +602,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         plot_every = int(sys.argv[1])
     
-    integrator = Integrator((50,50,50),grid_spacing=1e-15, plot_every=plot_every)
+    integrator = Integrator((50,50,50),grid_spacing=1e-25, plot_every=plot_every)
     # integrator = Integrator((50,50,50), grid_spacing=1, plot_every=plot_every)
     
     # Particle Initialization
@@ -524,7 +634,7 @@ if __name__ == "__main__":
     
     integrator.add_particles([c])
     
-    print(integrator.plane.particles[0].position)
+    # print(integrator.plane.particles[0].position)
     
     integrator.initialize_fields()
     integrator.simulate(dt=1e-20,N_steps=1000,save_animation=False)
