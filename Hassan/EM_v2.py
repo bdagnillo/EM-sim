@@ -261,7 +261,7 @@ def maxwell_fdtd_3d(E, B, rho, J, dt, dx):
 
 # Simulation parameters
 nx, ny, nz = 32, 32, 32
-dx = 1e-2
+dx = 1e-4
 dt = dx/(2*c)*0.001
 steps = 10000000
 

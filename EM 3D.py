@@ -6,6 +6,7 @@ from copy import deepcopy
 import sys
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation, FFMpegWriter
+import random
 
 # Constants
 epsilon_0 = 8.854187817e-12  # Vacuum permittivity in SI units (F/m)
@@ -16,8 +17,8 @@ electron_mass = 9.109e-31
 # testing
 # epsilon_0 = 1
 # mu_0 = 1
-elementary_charge = 1
-electron_mass = 1e-5
+# elementary_charge = 1
+# electron_mass = 1e-5
 
 @numba.jit(nopython=True)
 def gradient(arr, spacing, axis):
@@ -93,31 +94,49 @@ class Particle:
         self.mass = mass      # Mass (kilograms)
 
 
-@numba.njit(parallel=True)
-def compute_potentials(particles, xsize, ysize, zsize, dx, dy, dz):
+# @numba.njit(parallel=True)
+@numba.njit
+def compute_potentials(pos, q, v, xsize, ysize, zsize, dx, dy, dz):
     V = np.zeros((zsize, ysize, xsize))
     Ax = np.zeros((zsize, ysize, xsize))
     Ay = np.zeros((zsize, ysize, xsize))
     Az = np.zeros((zsize, ysize, xsize))
     
-    epsilon = 1e-10
+    epsilon = 1e-20
     r_cutoff = 1000 # change later
     
+    # for z in numba.prange(zsize):
+    #     for y in range(ysize):
+    #         for x in range(xsize):
+    #             for p in particles:
+    #                 rx = x * dx - p["position"][0]
+    #                 ry = y * dy - p["position"][1]
+    #                 rz = z * dz - p["position"][2]
+    #                 r_squared = rx**2 + ry**2 + rz**2
+                    
+    #                 if r_squared < r_cutoff**2:
+    #                     r = np.sqrt(r_squared) + epsilon
+    #                     V[z, y, x] += p["charge"] / (4 * np.pi * epsilon_0 * r)
+    #                     Ax[z, y, x] += (p["charge"] * p["velocity"][0] * mu_0) / (4 * np.pi * r)
+    #                     Ay[z, y, x] += (p["charge"] * p["velocity"][1] * mu_0) / (4 * np.pi * r)
+    #                     Az[z, y, x] += (p["charge"] * p["velocity"][2] * mu_0) / (4 * np.pi * r)
+    
+
     for z in numba.prange(zsize):
+    # for z in range(zsize):
         for y in range(ysize):
             for x in range(xsize):
-                for p in particles:
-                    rx = x * dx - p["position"][0]
-                    ry = y * dy - p["position"][1]
-                    rz = z * dz - p["position"][2]
-                    r_squared = rx**2 + ry**2 + rz**2
-                    
-                    if r_squared < r_cutoff**2:
-                        r = np.sqrt(r_squared) + epsilon
-                        V[z, y, x] += p["charge"] / (4 * np.pi * epsilon_0 * r)
-                        Ax[z, y, x] += (p["charge"] * p["velocity"][0] * mu_0) / (4 * np.pi * r)
-                        Ay[z, y, x] += (p["charge"] * p["velocity"][1] * mu_0) / (4 * np.pi * r)
-                        Az[z, y, x] += (p["charge"] * p["velocity"][2] * mu_0) / (4 * np.pi * r)
+                rx = x * dx - pos[0]
+                ry = y * dy - pos[1]
+                rz = z * dz - pos[2]
+                r_squared = rx**2 + ry**2 + rz**2
+                
+                # if r_squared:
+                r = np.sqrt(r_squared) + epsilon
+                V[z, y, x] += q / (4 * np.pi * epsilon_0 * r)
+                Ax[z, y, x] += (q * v[0] * mu_0) / (4 * np.pi * r)
+                Ay[z, y, x] += (q * v[1] * mu_0) / (4 * np.pi * r)
+                Az[z, y, x] += (q * v[2] * mu_0) / (4 * np.pi * r)
     
     return V, Ax, Ay, Az
 
@@ -129,7 +148,7 @@ class Plane:
         self.xsize = xsize
         self.ysize = ysize
         self.zsize = zsize
-        self.dx = self.dy = self.dz = grid_spacing
+        self.dx = self.dy = self.dz = self.grid_spacing = grid_spacing
         self.dtype = dtype
         self.particles = []
         
@@ -152,24 +171,27 @@ class Plane:
         
     def update_fields(self, timestep):
         # Create empty grids for new potentials
-        newV = np.zeros_like(self.V,dtype=np.float16)
-        newAx = np.zeros_like(self.Ax,dtype=np.float16)
-        newAy = np.zeros_like(self.Ay,dtype=np.float16)
-        newAz = np.zeros_like(self.Az,dtype=np.float16)
+        newV = np.zeros_like(self.V,dtype=np.float64)
+        newAx = np.zeros_like(self.Ax,dtype=np.float64)
+        newAy = np.zeros_like(self.Ay,dtype=np.float64)
+        newAz = np.zeros_like(self.Az,dtype=np.float64)
         
-        # Convert particle data into a structured array for Numba
-        particle_array = np.array([(p.charge, p.position, p.velocity) for p in self.particles],
-                    dtype=[('charge', np.float32), ('position', np.float32, 3), ('velocity', np.float32, 3)])
-        
-        # Compute potentials using Numba-accelerated function
-        newV, newAx, newAy, newAz = compute_potentials(particle_array, self.xsize, self.ysize, self.zsize, 
+        for p in self.particles:
+            out = compute_potentials(p.position, p.charge, p.velocity, self.xsize, self.ysize, self.zsize, 
                         self.dx, self.dy, self.dz)
+            newV += out[0]
+            newAx += out[1]
+            newAy += out[2]
+            newAz += out[3]
+        
         
         # Update plane fields
         dAdt = np.array([newAx - self.Ax, newAy - self.Ay, newAz - self.Az],dtype=np.float32) / timestep
         self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx) - dAdt
         # self.E[0], self.E[1], self.E[2] = np.gradient(-newV, self.dx)
         self.B = calculate_curl([newAx, newAy, newAz], self.dx, self.dy, self.dz)
+        
+        
         
         self.V = newV
         self.Ax = newAx
@@ -190,14 +212,15 @@ class Integrator:
             self.plane.add_particle(p)
     
     def initialize_fields(self):
-        self.plane.update_fields(timestep=1e-3)
+        self.plane.update_fields(timestep=1e-20)
         
 
     def plot2dslice(self):
         fig, axes = plt.subplots(1, 4, figsize=(15, 5))
         
         # Extract a 2D slice (e.g., at z=0) of the 3D electric field and potential
-        z_slice = 50
+        z_slice = int(self.plane.zsize/2) -1
+        # z_slice = 0
         Ex_2D = self.plane.E[0][z_slice, :, :]
         Ey_2D = self.plane.E[1][z_slice, :, :]
         V_2D = self.plane.V[z_slice, :, :]
@@ -230,6 +253,7 @@ class Integrator:
         
         # Plot particle positions
         axes[3].scatter([p.position[0] for p in self.plane.particles], [p.position[1] for p in self.plane.particles], c='red', label='Particles')
+        print([p.position for p in self.plane.particles])
         # axes[2].invert_yaxis()
         axes[3].set_title('Particle Positions')
         axes[3].set_xlabel('x')
@@ -276,6 +300,28 @@ class Integrator:
             
             if shape == "square":
                 return
+            
+    def create_random_particles(self, n, q, m, xsize, ysize, zsize, max_velocity, min_velocity = 0) -> list:
+        particles = []
+        q, m = [q,], [m,]
+        
+        
+        q, m = list(q), list(m)
+        if n > 1 and (len(q) != n) and (len(q) != len(m)):
+            raise IndexError(f"Lenghts of q and m ({len(q)}, {len(m)}) must match") 
+        c = [-1,1]
+        for i in range(n):
+            x, y, z = np.random.uniform([0,0,0], np.array([xsize, ysize, zsize]) * self.grid_spacing, 3)
+            vx, vy, vz = np.random.uniform(min_velocity, max_velocity, 3)
+            p = Particle(
+                position=[x,y,z],
+                velocity=[vx,vy,vz],
+                charge = q.pop() * random.choice(-1,1) if len(q) > 1 else q[0],
+                mass = m.pop() if len(m) > 1 else m[0]
+            )
+            particles.append(p)
+            
+        self.add_particles(particles)
     
         
     def simulate(self, dt=1e-6, N_steps = 10, save_animation=False):
@@ -358,24 +404,22 @@ class Integrator:
         print("Starting simulation")
         
         def loop(n):
+            
+            if save_animation:
+                return update()
+            
+            if self.plot_every is not None and n % int(self.plot_every) == 0:
+                self.plot2dslice()
+                # self.plot3dfield(10) # run if you want to crash your pc
+            
             times[n + 1] = times[n] + dt
             
-            # Update interpolators with new fields
-            Ex, Ey, Ez = self.plane.E[0], self.plane.E[1], self.plane.E[2]
-            Bx, By, Bz = self.plane.B[0], self.plane.B[1], self.plane.B[2]
-            
-            Ex_interp = RegularGridInterpolator((x, y, z), Ex)
-            Ey_interp = RegularGridInterpolator((x, y, z), Ey)
-            Ez_interp = RegularGridInterpolator((x, y, z), Ez)
-            
-            Bx_interp = RegularGridInterpolator((x, y, z), Bx)
-            By_interp = RegularGridInterpolator((x, y, z), By)
-            Bz_interp = RegularGridInterpolator((x, y, z), Bz)
+            print(self.plane.particles[0].position)
             
             # Write header for this iteration
             # xyz_file = open(self.path, 'w')
             xyz_file.write(f'{len(self.plane.particles)}\n')
-            xyz_file.write(f'Time={times[n + 1]:.5e} s\n')
+            xyz_file.write(f'Time={times[n + 1]:.6e} s\n')
             # xyz_file.close()
             
             self.average_velocity = np.mean([np.linalg.norm(p.velocity) for p in self.plane.particles])
@@ -391,19 +435,25 @@ class Integrator:
                 # Update particle using Euler's method
                 p.velocity += acceleration * dt
                 p.position += p.velocity * dt
+                p.position[p.position == 0] = self.grid_spacing
                 
                 
                 def apply_boundary(box_length, type="periodic"):
                     if type == "periodic":
                         for p in self.plane.particles:
-                            for i in range(len(p.position)):  # Loop over x, y, z components
+                            p.position = np.mod(p.position, [self.plane.xsize, self.plane.ysize, self.plane.zsize])
+                            p.position[p.position == 0] = self.grid_spacing
+                            # for i in range(len(p.position)):  # Loop over x, y, z components
                                 # Wrap the position to stay within [0, L)
-                                if p.position[i] < 0:
-                                    p.position[i] += box_length
-                                elif p.position[i] >= box_length:
-                                    p.position[i] -= box_length
+                                # if p.position[i] < 0:
+                                #     p.position[i] = box_length - 1e-9
+                                # elif p.position[i] >= box_length:
+                                #     p.position[i] = 1e-9
+                    if type == "none":
+                        pass
+                            
                 
-                apply_boundary(self.plane.xsize,"periodic")
+                apply_boundary(self.plane.xsize,"none")
                 
                 
                 # plt.scatter([p.position[0] for p in self.plane.particles], [p.position[1] for p in self.plane.particles])
@@ -412,7 +462,7 @@ class Integrator:
                 # Write particle position
                 x_pos, y_pos, z_pos = p.position
                 # xyz_file = open(self.path, 'w')
-                xyz_file.write(f'P {x_pos:.6f} {y_pos:.6f} {z_pos:.6f}\n')
+                xyz_file.write(f'P {x_pos:.6e} {y_pos:.6e} {z_pos:.6e}\n')
                 # xyz_file.close()
                 
                 print(f"Step: {n}, average velocity: {self.average_velocity}", end="\r")
@@ -420,12 +470,7 @@ class Integrator:
             # Update fields
             self.plane.update_fields(timestep=dt)
             
-            if save_animation:
-                return update()
             
-            if self.plot_every is not None and n % int(self.plot_every) == 0:
-                self.plot2dslice()
-                # self.plot3dfield(10) # run if you want to crash your pc
                 
         
         if save_animation:
@@ -447,7 +492,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         plot_every = int(sys.argv[1])
     
-    integrator = Integrator((200,200,200),grid_spacing=0.5, plot_every=plot_every)
+    integrator = Integrator((50,50,50),grid_spacing=1e-15, plot_every=plot_every)
+    # integrator = Integrator((50,50,50), grid_spacing=1, plot_every=plot_every)
     
     # Particle Initialization
     a = Particle(
@@ -459,24 +505,29 @@ if __name__ == "__main__":
     
     # Particle Initialization
     b = Particle(
-        position=[100, 100, 150],
+        position=[(integrator.plane.xsize + 10) * integrator.plane.grid_spacing, integrator.plane.xsize * integrator.plane.grid_spacing, integrator.plane.xsize * integrator.plane.grid_spacing],
         velocity=[0.0, 0.0, 0.0],
-        charge=-elementary_charge,
+        charge=-elementary_charge*10,
         mass=electron_mass
     )
     
     c = Particle(
-        position=[100, 100, 50],
+        position=[integrator.plane.xsize * integrator.plane.grid_spacing * 1/2, integrator.plane.xsize * integrator.plane.grid_spacing * 1/2, integrator.plane.xsize * integrator.plane.grid_spacing * 0.6],
         velocity=[0.0, 0.0, 0.0],
-        charge=elementary_charge,
+        charge=elementary_charge*10,
         mass=electron_mass
     )
     
-    particles = [a,b,c]    
-    integrator.add_particles(particles)
+    
+    
+    # integrator.create_random_particles(50,elementary_charge * 1e5,electron_mass, integrator.plane.xsize, integrator.plane.ysize, integrator.plane.zsize, 0, 0)
+    
+    integrator.add_particles([c])
+    
+    print(integrator.plane.particles[0].position)
     
     integrator.initialize_fields()
-    integrator.simulate(dt=0.5e-6,N_steps=10,save_animation=True)
+    integrator.simulate(dt=1e-20,N_steps=1000,save_animation=False)
     
     
 
